@@ -1,0 +1,83 @@
+name: OCI ARM retry
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  issues: write
+  contents: read
+
+jobs:
+  try:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+      STACK_ID: ${{ secrets.OCI_STACK_ID }}
+    steps:
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+
+      - name: Write OCI config
+        env:
+          OCI_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          OCI_USER: ${{ secrets.OCI_USER_OCID }}
+          OCI_FP: ${{ secrets.OCI_FINGERPRINT }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          cat > ~/.oci/config <<EOF
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FP
+          tenancy=$TENANCY
+          region=ap-mumbai-1
+          key_file=$HOME/.oci/key.pem
+          EOF
+          chmod 600 ~/.oci/config
+
+      - name: Try to create the server
+        run: |
+          set +e
+          find_instance() {
+            oci compute instance list --compartment-id "$TENANCY" --all \
+              --query 'data[?"display-name"==`"neomailserver"` && "lifecycle-state"!=`"TERMINATED"`] | [0].id' \
+              --raw-output 2>/dev/null
+          }
+          announce_and_stop() {
+            ID="$1"
+            IP=$(oci compute instance list-vnics --instance-id "$ID" \
+                  --query 'data[0]."public-ip"' --raw-output 2>/dev/null)
+            echo "SERVER EXISTS. Public IP: $IP"
+            gh issue create --title "Oracle ARM server created" \
+              --body "neomailserver is up. Public IP: ${IP:-check the Oracle console}"
+            gh workflow disable "$GITHUB_WORKFLOW"
+          }
+
+          ID=$(find_instance)
+          if [ -n "$ID" ] && [ "$ID" != "null" ]; then
+            announce_and_stop "$ID"; exit 0
+          fi
+
+          echo "No server yet - starting an apply job..."
+          STATE=$(oci resource-manager job create-apply-job \
+            --stack-id "$STACK_ID" \
+            --execution-plan-strategy AUTO_APPROVED \
+            --wait-for-state SUCCEEDED --wait-for-state FAILED \
+            --max-wait-seconds 900 \
+            --query 'data."lifecycle-state"' --raw-output 2>/dev/null)
+          echo "Result: ${STATE:-no answer}"
+
+          if [ "$STATE" = "SUCCEEDED" ]; then
+            sleep 30
+            ID=$(find_instance)
+            announce_and_stop "$ID"
+          fi
+          exit 0
