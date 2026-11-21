@@ -18,30 +18,49 @@ jobs:
       OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
-      STACK_ID: ${{ secrets.OCI_STACK_ID }}
     steps:
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
 
       - name: Write OCI config
         env:
-          OCI_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
-          OCI_USER: ${{ secrets.OCI_USER_OCID }}
-          OCI_FP: ${{ secrets.OCI_FINGERPRINT }}
+          RAW_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          RAW_USER: ${{ secrets.OCI_USER_OCID }}
+          RAW_FP: ${{ secrets.OCI_FINGERPRINT }}
+          RAW_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          RAW_STACK: ${{ secrets.OCI_STACK_ID }}
         run: |
           mkdir -p ~/.oci
-          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          clean() { printf '%s' "$1" | tr -d '[:space:]' | sed 's/^[a-z]*=//'; }
+          U=$(clean "$RAW_USER")
+          F=$(clean "$RAW_FP")
+          T=$(clean "$RAW_TENANCY")
+          S=$(clean "$RAW_STACK")
+
+          printf '%s\n' "$RAW_KEY" | tr -d '\r' | sed '/OCI_API_KEY/d' > ~/.oci/key.pem
           chmod 600 ~/.oci/key.pem
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=$OCI_USER
-          fingerprint=$OCI_FP
-          tenancy=$TENANCY
-          region=ap-mumbai-1
-          key_file=$HOME/.oci/key.pem
-          EOF
+
+          {
+            echo "[DEFAULT]"
+            echo "user=$U"
+            echo "fingerprint=$F"
+            echo "tenancy=$T"
+            echo "region=ap-mumbai-1"
+            echo "key_file=$HOME/.oci/key.pem"
+          } > ~/.oci/config
           chmod 600 ~/.oci/config
+
+          echo "TENANCY_ID=$T" >> "$GITHUB_ENV"
+          echo "STACK_ID=$S" >> "$GITHUB_ENV"
+
+          echo "Config structure:"
+          sed 's/=.*/=<set>/' ~/.oci/config
+          echo "user starts with: ${U:0:10}"
+          echo "tenancy starts with: ${T:0:13}"
+          echo "stack starts with: ${S:0:13}"
+          echo "fingerprint length: ${#F} (should be 47)"
+          echo "key first line: $(head -1 ~/.oci/key.pem)"
+          echo "key last line:  $(tail -1 ~/.oci/key.pem)"
 
       - name: Check Oracle login
         run: |
@@ -53,7 +72,7 @@ jobs:
           set +e
 
           find_instance() {
-            oci compute instance list --compartment-id "$TENANCY" --all \
+            oci compute instance list --compartment-id "$TENANCY_ID" --all \
               --query 'data[?"display-name"==`"neomailserver"` && "lifecycle-state"!=`"TERMINATED"`] | [0].id' \
               --raw-output
           }
